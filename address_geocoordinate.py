@@ -3,140 +3,104 @@ import pandas as pd
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import folium
+from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
+from typing import Optional
 
-# ---------------------------------------------------
-# Streamlit Configuration
-# ---------------------------------------------------
-st.set_page_config(page_title="📍 Address to Coordinates & Map", page_icon="🌍", layout="wide")
-st.title("📍 Address to Coordinates & Map Visualizer")
-st.markdown("""
-Easily convert one or more addresses into **latitude & longitude**  
-and view them on an interactive **map**.
-""")
+# -------------------------
+# Page config
+# -------------------------
+st.set_page_config(page_title="Address → Coordinates", page_icon="📍", layout="wide")
 
-# ---------------------------------------------------
-# Setup Geocoder
-# ---------------------------------------------------
-geolocator = Nominatim(user_agent="geo_app_streamlit")
-geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+# -------------------------
+# Helper: Geocoder (cached)
+# -------------------------
+@st.cache_data(show_spinner=False)
+def get_geolocator():
+    return Nominatim(user_agent="streamlit_address_geocoder_v1")
 
-# ---------------------------------------------------
-# Input Mode
-# ---------------------------------------------------
-mode = st.radio("Select Input Type:", ["Single Address", "Multiple Addresses"], horizontal=True)
+# Cache geocode results to avoid repeated requests during reruns
+@st.cache_data(show_spinner=False)
+def geocode_address(address: str) -> Optional[tuple]:
+    if not address or not address.strip():
+        return None
+    geolocator = get_geolocator()
+    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+    try:
+        loc = geocode(address)
+        if loc:
+            return (loc.latitude, loc.longitude)
+    except Exception:
+        # Could log error if desired
+        return None
+    return None
 
-# ---------------------------------------------------
-# Single Address Mode
-# ---------------------------------------------------
+# -------------------------
+# Session state initialization
+# -------------------------
+if "results" not in st.session_state:
+    st.session_state["results"] = None
+if "last_input_mode" not in st.session_state:
+    st.session_state["last_input_mode"] = None
+
+# -------------------------
+# UI
+# -------------------------
+st.title("📍 Address → Latitude & Longitude (with Map)")
+st.markdown(
+    "Convert a single address or multiple addresses (paste or CSV). Results are shown on an interactive map and can be downloaded."
+)
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    mode = st.radio("Input mode", ["Single Address", "Multiple Addresses"], horizontal=True)
+
+# Single address form
 if mode == "Single Address":
-    address = st.text_input("Enter an address:")
-    if st.button("Convert"):
+    with st.form(key="single_form"):
+        address = st.text_input("Enter address", placeholder="1600 Amphitheatre Parkway, Mountain View, CA")
+        submit_single = st.form_submit_button("Convert")
+    if submit_single:
+        st.session_state["last_input_mode"] = "single"
         if not address.strip():
-            st.warning("⚠️ Please enter a valid address.")
+            st.warning("Please enter a non-empty address.")
         else:
-            location = geocode(address)
-            if location:
-                lat, lon = location.latitude, location.longitude
-                st.success(f"✅ Found coordinates for **{address}**:")
-                st.write(f"**Latitude:** {lat}")
-                st.write(f"**Longitude:** {lon}")
-
-                # Create Folium Map
-                m = folium.Map(location=[lat, lon], zoom_start=13, tiles="OpenStreetMap")
-                folium.Marker(
-                    [lat, lon],
-                    popup=address,
-                    tooltip="Click for address",
-                    icon=folium.Icon(color="blue", icon="info-sign")
-                ).add_to(m)
-
-                st_folium(m, width=800, height=500)
+            st.info("Looking up address — this may take a second...")
+            coords = geocode_address(address)
+            if coords:
+                lat, lon = coords
+                df = pd.DataFrame([{"address": address, "latitude": lat, "longitude": lon}])
+                st.session_state["results"] = df
+                st.success("Address found and saved.")
             else:
-                st.error("❌ Address not found. Try refining your input.")
-
-# ---------------------------------------------------
-# Multiple Addresses Mode
-# ---------------------------------------------------
+                st.error("Address not found. Try refining the address.")
+# Multiple addresses form
 else:
-    st.write("You can either paste a list of addresses or upload a CSV file with an **'address'** column.")
-    input_type = st.radio("Choose input method:", ["Paste List", "Upload CSV"], horizontal=True)
-    addresses = []
-
-    if input_type == "Paste List":
-        addresses_text = st.text_area("Enter one address per line:")
-        if addresses_text.strip():
-            addresses = [a.strip() for a in addresses_text.split("\n") if a.strip()]
-
-    elif input_type == "Upload CSV":
-        uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
-        if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
-            if "address" not in df.columns:
-                st.error("❌ CSV must contain a column named 'address'.")
-            else:
-                addresses = df["address"].dropna().tolist()
-                st.info(f"✅ Loaded {len(addresses)} addresses.")
-
-    if st.button("Convert All"):
-        if not addresses:
-            st.warning("⚠️ Please provide some addresses first.")
+    with st.form(key="multi_form"):
+        input_type = st.radio("Provide addresses by", ["Paste list (one per line)", "Upload CSV with 'address' column"], horizontal=True)
+        addresses_text = ""
+        uploaded_file = None
+        if input_type == "Paste list (one per line)":
+            addresses_text = st.text_area("Paste addresses (one per line)", height=150, placeholder="1600 Amphitheatre Pkwy, Mountain View, CA\n10 Downing St, London")
         else:
-            st.write("🔍 Converting addresses, please wait...")
-            results = []
-            progress = st.progress(0)
-            total = len(addresses)
-
-            for i, addr in enumerate(addresses):
-                loc = geocode(addr)
-                if loc:
-                    results.append({
-                        "address": addr,
-                        "latitude": loc.latitude,
-                        "longitude": loc.longitude
-                    })
-                else:
-                    results.append({
-                        "address": addr,
-                        "latitude": None,
-                        "longitude": None
-                    })
-                progress.progress((i + 1) / total)
-
-            df_result = pd.DataFrame(results)
-            st.success("✅ Conversion completed!")
-            st.dataframe(df_result)
-
-            # Filter valid results
-            df_valid = df_result.dropna(subset=["latitude", "longitude"])
-
-            # Create and display map
-            if not df_valid.empty:
-                st.subheader("🗺️ Map Visualization")
-
-                m = folium.Map(
-                    location=[df_valid["latitude"].mean(), df_valid["longitude"].mean()],
-                    zoom_start=4,
-                    tiles="OpenStreetMap"
-                )
-
-                for _, row in df_valid.iterrows():
-                    folium.Marker(
-                        [row["latitude"], row["longitude"]],
-                        popup=row["address"],
-                        tooltip=row["address"],
-                        icon=folium.Icon(color="blue", icon="info-sign")
-                    ).add_to(m)
-
-                st_folium(m, width=900, height=550)
+            uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+        submit_multi = st.form_submit_button("Convert all")
+    if submit_multi:
+        st.session_state["last_input_mode"] = "multiple"
+        # read addresses
+        addresses = []
+        if input_type.startswith("Paste"):
+            if addresses_text.strip():
+                addresses = [a.strip() for a in addresses_text.splitlines() if a.strip()]
             else:
-                st.warning("No valid coordinates found to display on the map.")
-
-            # Allow download of CSV results
-            csv = df_result.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="📥 Download results as CSV",
-                data=csv,
-                file_name="address_coordinates.csv",
-                mime="text/csv"
-            )
+                st.warning("No addresses pasted.")
+        else:
+            if uploaded_file is None:
+                st.warning("No CSV uploaded.")
+            else:
+                try:
+                    df_up = pd.read_csv(uploaded_file)
+                    if "address" not in df_up.columns:
+                        st.error("CSV must contain a column named 'address'.")
+                    else:

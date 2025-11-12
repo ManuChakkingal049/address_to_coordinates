@@ -1,4 +1,5 @@
 streamlit
 geopy
 pandas
-pydeck
+folium
+streamlit-folium

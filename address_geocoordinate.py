@@ -104,3 +104,65 @@ else:
                     if "address" not in df_up.columns:
                         st.error("CSV must contain a column named 'address'.")
                     else:
+                        addresses = df_up["address"].dropna().astype(str).tolist()
+                        st.info(f"Loaded {len(addresses)} addresses from CSV.")
+                except Exception as e:
+                    st.error(f"Error reading CSV: {e}")
+
+        # If we have addresses, geocode them
+        if addresses:
+            st.info(f"Converting {len(addresses)} addresses — this may take a while depending on count.")
+            results = []
+            progress = st.progress(0)
+            total = len(addresses)
+            for i, addr in enumerate(addresses):
+                coords = geocode_address(addr)
+                if coords:
+                    lat, lon = coords
+                    results.append({"address": addr, "latitude": lat, "longitude": lon})
+                else:
+                    results.append({"address": addr, "latitude": None, "longitude": None})
+                progress.progress((i + 1) / total)
+            st.session_state["results"] = pd.DataFrame(results)
+            st.success("Batch geocoding finished.")
+
+# -------------------------
+# Display results and map (if available)
+# -------------------------
+if st.session_state["results"] is not None:
+    df_result = st.session_state["results"]
+    st.divider()
+    st.subheader("Results")
+    st.dataframe(df_result)
+
+    # Download button
+    csv_bytes = df_result.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 Download CSV", data=csv_bytes, file_name="address_coordinates.csv", mime="text/csv")
+
+    # Map visualization for valid coords
+    df_valid = df_result.dropna(subset=["latitude", "longitude"])
+    if not df_valid.empty:
+        st.subheader("Map")
+        # center map on mean coordinate
+        center_lat = float(df_valid["latitude"].mean())
+        center_lon = float(df_valid["longitude"].mean())
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=4, tiles="OpenStreetMap")
+
+        # Marker cluster
+        marker_cluster = MarkerCluster().add_to(m)
+
+        for _, row in df_valid.iterrows():
+            popup_html = folium.Popup(row["address"], parse_html=True, max_width=450)
+            folium.Marker(
+                [row["latitude"], row["longitude"]],
+                popup=popup_html,
+                tooltip=row["address"],
+                icon=folium.Icon(color="blue", icon="info-sign")
+            ).add_to(marker_cluster)
+
+        # Display with streamlit_folium (this persists across reruns because st.session_state stores df)
+        st_folium(m, width=900, height=550)
+    else:
+        st.warning("No valid coordinates to show on the map.")
+else:
+    st.info("No results yet — enter an address or upload/paste addresses and click Convert.")

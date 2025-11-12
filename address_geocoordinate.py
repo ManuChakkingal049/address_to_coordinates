@@ -6,7 +6,7 @@ from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 # -------------------------
-# Page config
+# Page configuration
 # -------------------------
 st.set_page_config(page_title="Address → Coordinates", page_icon="📍", layout="wide")
 
@@ -34,12 +34,11 @@ def geocode_address(address: str) -> Optional[tuple]:
         if loc:
             return (loc.latitude, loc.longitude)
     except Exception:
-        # Don't raise — return None so app remains stable.
         return None
     return None
 
 # -------------------------
-# Session state init
+# Session state initialization
 # -------------------------
 if "results" not in st.session_state:
     st.session_state["results"] = None
@@ -49,13 +48,13 @@ if "last_input_mode" not in st.session_state:
 # -------------------------
 # UI header
 # -------------------------
-st.title("📍 Address → Latitude & Longitude (Folium map)")
+st.title("📍 Address → Latitude & Longitude (Folium Map)")
 st.markdown(
     "Convert a single address or multiple addresses (paste or CSV). Results persist and are shown on an interactive Folium map."
 )
 
 # -------------------------
-# Input columns
+# Input selection
 # -------------------------
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -73,7 +72,7 @@ if mode == "Single Address":
         if not address.strip():
             st.warning("Please enter a non-empty address.")
         else:
-            st.info("Looking up address (might take a second)...")
+            st.info("Looking up address (may take a second)...")
             coords = geocode_address(address)
             if coords:
                 lat, lon = coords
@@ -88,14 +87,22 @@ if mode == "Single Address":
 # -------------------------
 else:
     with st.form("multi_form"):
-        input_type = st.radio("Provide addresses by", ["Paste list (one per line)", "Upload CSV with 'address' column"], horizontal=True)
+        input_type = st.radio(
+            "Provide addresses by", 
+            ["Paste list (one per line)", "Upload CSV with 'address' column"], 
+            horizontal=True
+        )
         addresses_text = ""
         uploaded_file = None
         if input_type.startswith("Paste"):
-            addresses_text = st.text_area("Paste addresses (one per line)", height=150, placeholder="1600 Amphitheatre Pkwy, Mountain View, CA\n10 Downing St, London")
+            addresses_text = st.text_area(
+                "Paste addresses (one per line)", height=150,
+                placeholder="1600 Amphitheatre Pkwy, Mountain View, CA\n10 Downing St, London"
+            )
         else:
             uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
         submit_multi = st.form_submit_button("Convert all")
+    
     if submit_multi:
         st.session_state["last_input_mode"] = "multiple"
         addresses = []
@@ -119,7 +126,7 @@ else:
                     st.error(f"Error reading CSV: {e}")
 
         if addresses:
-            st.info(f"Converting {len(addresses)} addresses — this may take a while depending on count.")
+            st.info(f"Converting {len(addresses)} addresses — this may take a while.")
             results = []
             progress = st.progress(0)
             total = len(addresses)
@@ -143,11 +150,11 @@ if st.session_state["results"] is not None:
     st.subheader("Results")
     st.dataframe(df_result)
 
-    # Download
+    # Download CSV
     csv_bytes = df_result.to_csv(index=False).encode("utf-8")
     st.download_button("📥 Download CSV", data=csv_bytes, file_name="address_coordinates.csv", mime="text/csv")
 
-    # Map
+    # Map display
     df_valid = df_result.dropna(subset=["latitude", "longitude"])
     if not df_valid.empty:
         st.subheader("Map")
@@ -156,4 +163,17 @@ if st.session_state["results"] is not None:
         m = folium.Map(location=[center_lat, center_lon], zoom_start=4, tiles="OpenStreetMap")
 
         marker_cluster = MarkerCluster().add_to(m)
-        for _,_
+        for _, row in df_valid.iterrows():
+            popup_html = folium.Popup(row["address"], parse_html=True, max_width=450)
+            folium.Marker(
+                [row["latitude"], row["longitude"]],
+                popup=popup_html,
+                tooltip=row["address"],
+                icon=folium.Icon(color="blue", icon="info-sign")
+            ).add_to(marker_cluster)
+
+        st_folium(m, width=900, height=550)
+    else:
+        st.warning("No valid coordinates to show on the map.")
+else:
+    st.info("No results yet — enter an address or upload/paste addresses and click Convert.")

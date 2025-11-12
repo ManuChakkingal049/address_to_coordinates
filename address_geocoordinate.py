@@ -1,92 +1,86 @@
 import streamlit as st
 import pandas as pd
-from typing import Optional
+import requests
+import re
 import folium
 from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
-import re
 
-# -------------------------
-# Page configuration
-# -------------------------
-st.set_page_config(page_title="Fast Address → Coordinates", page_icon="📍", layout="wide")
-st.title("📍 Fast Address → Coordinates (Limited Fallback, Comment Column)")
+# -----------------------------
+# Page setup
+# -----------------------------
+st.set_page_config(page_title="Address → Coordinates (Photon)", layout="wide")
+st.title("📍 Address to Coordinates using Photon (OpenStreetMap)")
+
 st.markdown("""
-Convert single or multiple addresses into latitude & longitude.  
-Only **2 geocoding attempts** per address (full → street+city) to speed up processing.  
-A `comment` column shows match outcome.
+Convert single or multiple addresses into latitude & longitude using the **Photon geocoder** (based on OpenStreetMap).  
+Fallback logic: full address → street + city. No API key required.
 """)
 
-# -------------------------
-# Session state
-# -------------------------
-if "results" not in st.session_state:
-    st.session_state["results"] = None
-
-# -------------------------
-# Helper: clean address
-# -------------------------
+# -----------------------------
+# Helper functions
+# -----------------------------
 def clean_address(addr: str) -> str:
     """Replace dashes with commas, remove extra spaces."""
     addr_clean = re.sub(r"\s*-\s*", ", ", addr.strip())
     addr_clean = re.sub(r"\s+", " ", addr_clean)
-    return addr_clean
+    return addr_clean.strip(", ").strip()
 
-# -------------------------
-# Limited geocode function
-# -------------------------
-def geocode_limited(addr: str, geolocator, geocode_fn) -> tuple:
-    """
-    Try full address first, then street+city. Max 2 tries.
-    Returns: lat, lon, match_type, comment
-    """
+def geocode_photon(addr: str):
+    """Query Photon API and return (lat, lon) or (None, None)"""
+    url = "https://photon.komoot.io/api/"
+    params = {"q": addr, "limit": 1}
+    try:
+        resp = requests.get(url, params=params, timeout=5)
+        data = resp.json()
+        if data.get("features"):
+            coords = data["features"][0]["geometry"]["coordinates"]
+            return coords[1], coords[0]  # Return (lat, lon)
+    except Exception:
+        return None, None
+    return None, None
+
+def geocode_with_fallback(addr: str):
+    """Try full address first, then street+city fallback."""
     addr_clean = clean_address(addr)
-
     # 1. Full address
-    loc = geocode_fn(addr_clean)
-    if loc:
-        return float(loc.latitude), float(loc.longitude), "full", "matched full"
-
-    # 2. Street+city
+    lat, lon = geocode_photon(addr_clean)
+    if lat is not None and lon is not None:
+        return lat, lon, "full", "matched full address"
+    # 2. Street+city fallback
     parts = [p.strip() for p in addr_clean.split(",") if p.strip()]
     if len(parts) >= 2:
-        addr_street_city = ", ".join(parts[1:])
-        loc = geocode_fn(addr_street_city)
-        if loc:
-            return float(loc.latitude), float(loc.longitude), "street+city", "matched street+city"
+        fallback_addr = ", ".join(parts[1:])
+        lat2, lon2 = geocode_photon(fallback_addr)
+        if lat2 is not None and lon2 is not None:
+            return lat2, lon2, "street+city", f"matched using fallback: '{fallback_addr}'"
+    # Not found
+    return None, None, "not found", "no match found"
 
-    # Not found after 2 tries
-    return None, None, "not found", "not found after 2 tries"
+# -----------------------------
+# Session state
+# -----------------------------
+if "results" not in st.session_state:
+    st.session_state["results"] = None
 
-# -------------------------
-# Geopy setup
-# -------------------------
-geolocator = Nominatim(user_agent="streamlit_address_fast")
-geocode_fn = RateLimiter(geolocator.geocode, min_delay_seconds=1)
-
-# -------------------------
+# -----------------------------
 # Input mode
-# -------------------------
+# -----------------------------
 mode = st.radio("Input mode", ["Single Address", "Multiple Addresses"], horizontal=True)
 
-# -------------------------
-# Single address
-# -------------------------
+# -----------------------------
+# Single Address
+# -----------------------------
 if mode == "Single Address":
     with st.form("single_form"):
-        address = st.text_input(
-            "Enter address",
-            placeholder="Al Masraf Tower - Hamdan Bin Mohammed St - Al Zahiyah - E15 - Abu Dhabi"
-        )
-        submit_single = st.form_submit_button("Convert")
-    if submit_single:
+        address = st.text_input("Enter an address:", placeholder="Al Masraf Tower - Hamdan Bin Mohammed St - Al Zahiyah - Abu Dhabi")
+        submit = st.form_submit_button("Convert")
+    if submit:
         if not address.strip():
-            st.warning("Enter a valid address")
+            st.warning("Please enter a valid address.")
         else:
             st.info("Geocoding...")
-            lat, lon, match_type, comment = geocode_limited(address, geolocator, geocode_fn)
+            lat, lon, match_type, comment = geocode_with_fallback(address)
             df = pd.DataFrame([{
                 "address": address,
                 "latitude": lat,
@@ -97,44 +91,43 @@ if mode == "Single Address":
             st.session_state["results"] = df
             st.success("Done!")
 
-# -------------------------
-# Multiple addresses
-# -------------------------
+# -----------------------------
+# Multiple Addresses
+# -----------------------------
 else:
     with st.form("multi_form"):
-        input_type = st.radio(
-            "Provide addresses by",
-            ["Paste list (one per line)", "Upload CSV with 'address' column"],
-            horizontal=True
-        )
+        input_type = st.radio("Input method:", ["Paste list (one per line)", "Upload CSV with 'address' column"], horizontal=True)
         addresses_text = ""
         uploaded_file = None
         if input_type.startswith("Paste"):
-            addresses_text = st.text_area("Paste addresses (one per line)", height=150)
+            addresses_text = st.text_area("Enter one address per line:", height=150)
         else:
             uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
-        submit_multi = st.form_submit_button("Convert all")
-
-    if submit_multi:
+        submit = st.form_submit_button("Convert All")
+    if submit:
         addresses = []
         if input_type.startswith("Paste"):
             if addresses_text.strip():
                 addresses = [a.strip() for a in addresses_text.splitlines() if a.strip()]
         else:
             if uploaded_file is not None:
-                df_up = pd.read_csv(uploaded_file)
-                if "address" in df_up.columns:
-                    addresses = df_up["address"].dropna().astype(str).tolist()
-                else:
-                    st.error("CSV must contain 'address' column")
-                    addresses = []
+                try:
+                    df_up = pd.read_csv(uploaded_file)
+                    if "address" not in df_up.columns:
+                        st.error("CSV must contain a column named 'address'.")
+                    else:
+                        addresses = df_up["address"].dropna().astype(str).tolist()
+                        st.write(f"✅ Loaded {len(addresses)} addresses.")
+                except Exception as e:
+                    st.error(f"Error reading CSV: {e}")
 
         if addresses:
             st.info(f"Geocoding {len(addresses)} addresses...")
             results = []
             progress = st.progress(0)
+            total = len(addresses)
             for i, addr in enumerate(addresses):
-                lat, lon, match_type, comment = geocode_limited(addr, geolocator, geocode_fn)
+                lat, lon, match_type, comment = geocode_with_fallback(addr)
                 results.append({
                     "address": addr,
                     "latitude": lat,
@@ -142,14 +135,14 @@ else:
                     "match_type": match_type,
                     "comment": comment
                 })
-                progress.progress((i + 1) / len(addresses))
+                progress.progress((i+1)/total)
             df_result = pd.DataFrame(results)
             st.session_state["results"] = df_result
-            st.success("Done!")
+            st.success("Batch finished.")
 
-# -------------------------
-# Display results and map
-# -------------------------
+# -----------------------------
+# Display results & map
+# -----------------------------
 if st.session_state["results"] is not None:
     df_result = st.session_state["results"]
 
@@ -175,11 +168,11 @@ if st.session_state["results"] is not None:
 
         marker_cluster = MarkerCluster().add_to(m)
         for _, row in df_result.iterrows():
-            color = "blue" if row["match_type"] != "not found" else "red"
             if pd.notna(row["latitude"]) and pd.notna(row["longitude"]):
+                color = "blue" if row["match_type"] != "not found" else "red"
                 popup_html = folium.Popup(
                     f"{row['address']}<br>Match type: {row['match_type']}<br>Comment: {row['comment']}",
-                    parse_html=True
+                    max_width=400, parse_html=True
                 )
                 folium.Marker(
                     [row["latitude"], row["longitude"]],

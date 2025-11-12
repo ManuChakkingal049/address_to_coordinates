@@ -2,30 +2,33 @@ import streamlit as st
 import pandas as pd
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
-import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
 
-# -------------------------------
-# App Configuration
-# -------------------------------
-st.set_page_config(page_title="Address → Coordinates Converter", page_icon="📍", layout="wide")
-
+# ---------------------------------------------------
+# Streamlit Configuration
+# ---------------------------------------------------
+st.set_page_config(page_title="📍 Address to Coordinates & Map", page_icon="🌍", layout="wide")
 st.title("📍 Address to Coordinates & Map Visualizer")
 st.markdown("""
-Convert one or more addresses into **latitude & longitude**,  
-and view their exact positions on an interactive map.
+Easily convert one or more addresses into **latitude & longitude**  
+and view them on an interactive **map**.
 """)
 
-# -------------------------------
-# Geocoding Setup
-# -------------------------------
+# ---------------------------------------------------
+# Setup Geocoder
+# ---------------------------------------------------
 geolocator = Nominatim(user_agent="geo_app_streamlit")
 geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
 
-# -------------------------------
-# User Input Mode
-# -------------------------------
+# ---------------------------------------------------
+# Input Mode
+# ---------------------------------------------------
 mode = st.radio("Select Input Type:", ["Single Address", "Multiple Addresses"], horizontal=True)
 
+# ---------------------------------------------------
+# Single Address Mode
+# ---------------------------------------------------
 if mode == "Single Address":
     address = st.text_input("Enter an address:")
     if st.button("Convert"):
@@ -39,37 +42,25 @@ if mode == "Single Address":
                 st.write(f"**Latitude:** {lat}")
                 st.write(f"**Longitude:** {lon}")
 
-                # Display map
-                df_map = pd.DataFrame([[lat, lon, address]], columns=["lat", "lon", "address"])
-                st.pydeck_chart(pdk.Deck(
-                    map_style="mapbox://styles/mapbox/streets-v12",
-                    initial_view_state=pdk.ViewState(latitude=lat, longitude=lon, zoom=12, pitch=30),
-                    layers=[
-                        pdk.Layer(
-                            "ScatterplotLayer",
-                            data=df_map,
-                            get_position=["lon", "lat"],
-                            get_color=[255, 0, 0, 160],
-                            get_radius=100,
-                        ),
-                        pdk.Layer(
-                            "TextLayer",
-                            data=df_map,
-                            get_position=["lon", "lat"],
-                            get_text="address",
-                            get_size=14,
-                            get_color=[0, 0, 0],
-                            pickable=True,
-                        )
-                    ],
-                ))
+                # Create Folium Map
+                m = folium.Map(location=[lat, lon], zoom_start=13, tiles="OpenStreetMap")
+                folium.Marker(
+                    [lat, lon],
+                    popup=address,
+                    tooltip="Click for address",
+                    icon=folium.Icon(color="blue", icon="info-sign")
+                ).add_to(m)
+
+                st_folium(m, width=800, height=500)
             else:
                 st.error("❌ Address not found. Try refining your input.")
 
+# ---------------------------------------------------
+# Multiple Addresses Mode
+# ---------------------------------------------------
 else:
     st.write("You can either paste a list of addresses or upload a CSV file with an **'address'** column.")
     input_type = st.radio("Choose input method:", ["Paste List", "Upload CSV"], horizontal=True)
-
     addresses = []
 
     if input_type == "Paste List":
@@ -91,64 +82,61 @@ else:
         if not addresses:
             st.warning("⚠️ Please provide some addresses first.")
         else:
-            results = []
             st.write("🔍 Converting addresses, please wait...")
+            results = []
             progress = st.progress(0)
             total = len(addresses)
 
             for i, addr in enumerate(addresses):
                 loc = geocode(addr)
                 if loc:
-                    results.append({"address": addr, "latitude": loc.latitude, "longitude": loc.longitude})
+                    results.append({
+                        "address": addr,
+                        "latitude": loc.latitude,
+                        "longitude": loc.longitude
+                    })
                 else:
-                    results.append({"address": addr, "latitude": None, "longitude": None})
+                    results.append({
+                        "address": addr,
+                        "latitude": None,
+                        "longitude": None
+                    })
                 progress.progress((i + 1) / total)
 
             df_result = pd.DataFrame(results)
             st.success("✅ Conversion completed!")
-
             st.dataframe(df_result)
 
-            # Remove None values before plotting
+            # Filter valid results
             df_valid = df_result.dropna(subset=["latitude", "longitude"])
 
+            # Create and display map
             if not df_valid.empty:
                 st.subheader("🗺️ Map Visualization")
-                st.pydeck_chart(pdk.Deck(
-                    map_style="mapbox://styles/mapbox/streets-v12",
-                    initial_view_state=pdk.ViewState(
-                        latitude=df_valid["latitude"].mean(),
-                        longitude=df_valid["longitude"].mean(),
-                        zoom=3,
-                        pitch=30,
-                    ),
-                    layers=[
-                        pdk.Layer(
-                            "ScatterplotLayer",
-                            data=df_valid,
-                            get_position=["longitude", "latitude"],
-                            get_color=[0, 128, 255, 180],
-                            get_radius=200,
-                        ),
-                        pdk.Layer(
-                            "TextLayer",
-                            data=df_valid,
-                            get_position=["longitude", "latitude"],
-                            get_text="address",
-                            get_size=12,
-                            get_color=[0, 0, 0],
-                            pickable=True,
-                        )
-                    ],
-                ))
-            else:
-                st.warning("No valid locations found for map display.")
 
-            # Download option
+                m = folium.Map(
+                    location=[df_valid["latitude"].mean(), df_valid["longitude"].mean()],
+                    zoom_start=4,
+                    tiles="OpenStreetMap"
+                )
+
+                for _, row in df_valid.iterrows():
+                    folium.Marker(
+                        [row["latitude"], row["longitude"]],
+                        popup=row["address"],
+                        tooltip=row["address"],
+                        icon=folium.Icon(color="blue", icon="info-sign")
+                    ).add_to(m)
+
+                st_folium(m, width=900, height=550)
+            else:
+                st.warning("No valid coordinates found to display on the map.")
+
+            # Allow download of CSV results
             csv = df_result.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="📥 Download results as CSV",
                 data=csv,
                 file_name="address_coordinates.csv",
-                mime="text/csv",
+                mime="text/csv"
             )

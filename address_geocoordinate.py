@@ -6,12 +6,13 @@ from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
+import re
 
 # -------------------------
-# Page config
+# Page configuration
 # -------------------------
-st.set_page_config(page_title="Address → Coordinates (Fuzzy)", page_icon="📍", layout="wide")
-st.title("📍 Address → Coordinates with Fuzzy Matching")
+st.set_page_config(page_title="Address → Coordinates (Robust)", page_icon="📍", layout="wide")
+st.title("📍 Address → Coordinates (Fuzzy Matching, Arabic/Latin)")
 st.markdown("""
 Convert single or multiple addresses into **latitude & longitude**.  
 Automatically fallback if the full address does not match, and record the match type.
@@ -24,45 +25,45 @@ if "results" not in st.session_state:
     st.session_state["results"] = None
 
 # -------------------------
-# Helper: clean address
+# Clean address
 # -------------------------
 def clean_address(addr: str) -> str:
-    return addr.replace("-", ",").replace("  ", " ").strip()
+    """Replace dashes with commas and remove extra spaces."""
+    addr_clean = re.sub(r"\s*-\s*", ", ", addr.strip())
+    addr_clean = re.sub(r"\s+", " ", addr_clean)
+    return addr_clean
 
 # -------------------------
 # Geocode with fallback
 # -------------------------
 def geocode_fallback(addr: str, geolocator, geocode_fn) -> tuple:
     """
-    Try full address first.
-    If fails, remove building info and try street+city.
-    If fails, try city only.
-    Returns (lat, lon, match_type)
+    Returns numeric (lat, lon) and match_type.
+    If geocoding fails, returns (None, None, "not found").
     """
-    # clean address
     addr_clean = clean_address(addr)
 
     # 1. Full address
     loc = geocode_fn(addr_clean)
     if loc:
-        return loc[0], loc[1], "full"
+        return float(loc.latitude), float(loc.longitude), "full"
 
-    # 2. Try removing first part (e.g., building name)
+    # 2. Remove first part (building name) → street + city
     parts = [p.strip() for p in addr_clean.split(",") if p.strip()]
     if len(parts) >= 2:
         addr_street_city = ", ".join(parts[1:])
         loc = geocode_fn(addr_street_city)
         if loc:
-            return loc[0], loc[1], "street+city"
+            return float(loc.latitude), float(loc.longitude), "street+city"
 
-    # 3. Try last part only (e.g., city/province)
+    # 3. Last two parts → city/province
     if len(parts) >= 1:
-        addr_city = ", ".join(parts[-2:])  # last two parts
+        addr_city = ", ".join(parts[-2:])
         loc = geocode_fn(addr_city)
         if loc:
-            return loc[0], loc[1], "city"
+            return float(loc.latitude), float(loc.longitude), "city"
 
-    # Not found
+    # 4. Not found
     return None, None, "not found"
 
 # -------------------------
@@ -81,7 +82,10 @@ mode = st.radio("Input mode", ["Single Address", "Multiple Addresses"], horizont
 # -------------------------
 if mode == "Single Address":
     with st.form("single_form"):
-        address = st.text_input("Enter address", placeholder="Al Masraf Tower - Hamdan Bin Mohammed St - Al Zahiyah - E15 - Abu Dhabi")
+        address = st.text_input(
+            "Enter address",
+            placeholder="Al Masraf Tower - Hamdan Bin Mohammed St - Al Zahiyah - E15 - Abu Dhabi"
+        )
         submit_single = st.form_submit_button("Convert")
     if submit_single:
         if not address.strip():
@@ -98,7 +102,11 @@ if mode == "Single Address":
 # -------------------------
 else:
     with st.form("multi_form"):
-        input_type = st.radio("Provide addresses by", ["Paste list (one per line)", "Upload CSV with 'address' column"], horizontal=True)
+        input_type = st.radio(
+            "Provide addresses by",
+            ["Paste list (one per line)", "Upload CSV with 'address' column"],
+            horizontal=True
+        )
         addresses_text = ""
         uploaded_file = None
         if input_type.startswith("Paste"):
@@ -138,6 +146,12 @@ else:
 # -------------------------
 if st.session_state["results"] is not None:
     df_result = st.session_state["results"]
+
+    # Ensure numeric latitude/longitude
+    df_result["latitude"] = pd.to_numeric(df_result["latitude"], errors="coerce")
+    df_result["longitude"] = pd.to_numeric(df_result["longitude"], errors="coerce")
+    df_valid = df_result.dropna(subset=["latitude", "longitude"])
+
     st.divider()
     st.subheader("Results")
     st.dataframe(df_result)
@@ -147,23 +161,30 @@ if st.session_state["results"] is not None:
     st.download_button("📥 Download CSV", data=csv_bytes, file_name="address_coordinates.csv", mime="text/csv")
 
     # Map
-    df_valid = df_result.dropna(subset=["latitude", "longitude"])
     if not df_valid.empty:
         st.subheader("Map")
         center_lat = float(df_valid["latitude"].mean())
         center_lon = float(df_valid["longitude"].mean())
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=4, tiles="OpenStreetMap")
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=5, tiles="OpenStreetMap")
 
         marker_cluster = MarkerCluster().add_to(m)
-        for _, row in df_valid.iterrows():
-            popup_html = folium.Popup(row["address"] + f"<br>Match type: {row['match_type']}", parse_html=True)
-            folium.Marker(
-                [row["latitude"], row["longitude"]],
-                popup=popup_html,
-                tooltip=row["address"],
-                icon=folium.Icon(color="blue" if row["match_type"]!="not found" else "red", icon="info-sign")
-            ).add_to(marker_cluster)
+        for _, row in df_result.iterrows():
+            # Color red if not found
+            color = "blue" if row["match_type"] != "not found" else "red"
+            popup_html = folium.Popup(
+                f"{row['address']}<br>Match type: {row['match_type']}",
+                parse_html=True
+            )
+            if pd.notna(row["latitude"]) and pd.notna(row["longitude"]):
+                folium.Marker(
+                    [row["latitude"], row["longitude"]],
+                    popup=popup_html,
+                    tooltip=row["address"],
+                    icon=folium.Icon(color=color, icon="info-sign")
+                ).add_to(marker_cluster)
 
         st_folium(m, width=900, height=550)
     else:
         st.warning("No valid coordinates to show on the map.")
+else:
+    st.info("No results yet — enter an address or upload/paste addresses and click Convert.")

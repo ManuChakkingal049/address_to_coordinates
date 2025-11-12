@@ -11,11 +11,12 @@ import re
 # -------------------------
 # Page configuration
 # -------------------------
-st.set_page_config(page_title="Address → Coordinates (Robust)", page_icon="📍", layout="wide")
-st.title("📍 Address → Coordinates (Fuzzy Matching, Arabic/Latin)")
+st.set_page_config(page_title="Fast Address → Coordinates", page_icon="📍", layout="wide")
+st.title("📍 Fast Address → Coordinates (Limited Fallback, Comment Column)")
 st.markdown("""
-Convert single or multiple addresses into **latitude & longitude**.  
-Automatically fallback if the full address does not match, and record the match type.
+Convert single or multiple addresses into latitude & longitude.  
+Only **2 geocoding attempts** per address (full → street+city) to speed up processing.  
+A `comment` column shows match outcome.
 """)
 
 # -------------------------
@@ -25,51 +26,44 @@ if "results" not in st.session_state:
     st.session_state["results"] = None
 
 # -------------------------
-# Clean address
+# Helper: clean address
 # -------------------------
 def clean_address(addr: str) -> str:
-    """Replace dashes with commas and remove extra spaces."""
+    """Replace dashes with commas, remove extra spaces."""
     addr_clean = re.sub(r"\s*-\s*", ", ", addr.strip())
     addr_clean = re.sub(r"\s+", " ", addr_clean)
     return addr_clean
 
 # -------------------------
-# Geocode with fallback
+# Limited geocode function
 # -------------------------
-def geocode_fallback(addr: str, geolocator, geocode_fn) -> tuple:
+def geocode_limited(addr: str, geolocator, geocode_fn) -> tuple:
     """
-    Returns numeric (lat, lon) and match_type.
-    If geocoding fails, returns (None, None, "not found").
+    Try full address first, then street+city. Max 2 tries.
+    Returns: lat, lon, match_type, comment
     """
     addr_clean = clean_address(addr)
 
     # 1. Full address
     loc = geocode_fn(addr_clean)
     if loc:
-        return float(loc.latitude), float(loc.longitude), "full"
+        return float(loc.latitude), float(loc.longitude), "full", "matched full"
 
-    # 2. Remove first part (building name) → street + city
+    # 2. Street+city
     parts = [p.strip() for p in addr_clean.split(",") if p.strip()]
     if len(parts) >= 2:
         addr_street_city = ", ".join(parts[1:])
         loc = geocode_fn(addr_street_city)
         if loc:
-            return float(loc.latitude), float(loc.longitude), "street+city"
+            return float(loc.latitude), float(loc.longitude), "street+city", "matched street+city"
 
-    # 3. Last two parts → city/province
-    if len(parts) >= 1:
-        addr_city = ", ".join(parts[-2:])
-        loc = geocode_fn(addr_city)
-        if loc:
-            return float(loc.latitude), float(loc.longitude), "city"
-
-    # 4. Not found
-    return None, None, "not found"
+    # Not found after 2 tries
+    return None, None, "not found", "not found after 2 tries"
 
 # -------------------------
 # Geopy setup
 # -------------------------
-geolocator = Nominatim(user_agent="streamlit_address_fuzzy")
+geolocator = Nominatim(user_agent="streamlit_address_fast")
 geocode_fn = RateLimiter(geolocator.geocode, min_delay_seconds=1)
 
 # -------------------------
@@ -92,8 +86,14 @@ if mode == "Single Address":
             st.warning("Enter a valid address")
         else:
             st.info("Geocoding...")
-            lat, lon, match_type = geocode_fallback(address, geolocator, geocode_fn)
-            df = pd.DataFrame([{"address": address, "latitude": lat, "longitude": lon, "match_type": match_type}])
+            lat, lon, match_type, comment = geocode_limited(address, geolocator, geocode_fn)
+            df = pd.DataFrame([{
+                "address": address,
+                "latitude": lat,
+                "longitude": lon,
+                "match_type": match_type,
+                "comment": comment
+            }])
             st.session_state["results"] = df
             st.success("Done!")
 
@@ -134,8 +134,14 @@ else:
             results = []
             progress = st.progress(0)
             for i, addr in enumerate(addresses):
-                lat, lon, match_type = geocode_fallback(addr, geolocator, geocode_fn)
-                results.append({"address": addr, "latitude": lat, "longitude": lon, "match_type": match_type})
+                lat, lon, match_type, comment = geocode_limited(addr, geolocator, geocode_fn)
+                results.append({
+                    "address": addr,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "match_type": match_type,
+                    "comment": comment
+                })
                 progress.progress((i + 1) / len(addresses))
             df_result = pd.DataFrame(results)
             st.session_state["results"] = df_result
@@ -147,7 +153,7 @@ else:
 if st.session_state["results"] is not None:
     df_result = st.session_state["results"]
 
-    # Ensure numeric latitude/longitude
+    # Ensure numeric lat/lon
     df_result["latitude"] = pd.to_numeric(df_result["latitude"], errors="coerce")
     df_result["longitude"] = pd.to_numeric(df_result["longitude"], errors="coerce")
     df_valid = df_result.dropna(subset=["latitude", "longitude"])
@@ -169,13 +175,12 @@ if st.session_state["results"] is not None:
 
         marker_cluster = MarkerCluster().add_to(m)
         for _, row in df_result.iterrows():
-            # Color red if not found
             color = "blue" if row["match_type"] != "not found" else "red"
-            popup_html = folium.Popup(
-                f"{row['address']}<br>Match type: {row['match_type']}",
-                parse_html=True
-            )
             if pd.notna(row["latitude"]) and pd.notna(row["longitude"]):
+                popup_html = folium.Popup(
+                    f"{row['address']}<br>Match type: {row['match_type']}<br>Comment: {row['comment']}",
+                    parse_html=True
+                )
                 folium.Marker(
                     [row["latitude"], row["longitude"]],
                     popup=popup_html,
